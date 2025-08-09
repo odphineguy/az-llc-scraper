@@ -1,113 +1,87 @@
-import os
-import sqlite3
-import datetime
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+from flask import Flask, jsonify
 from playwright.sync_api import sync_playwright
+from datetime import datetime, timedelta
+import sqlite3
 
 app = Flask(__name__)
-CORS(app)
 
 DB_FILE = "llcs.db"
 
-# ---------- DATABASE SETUP ----------
+# --- Database setup ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''
+    c.execute("""
         CREATE TABLE IF NOT EXISTS llcs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT,
             filing_date TEXT,
-            link TEXT,
-            UNIQUE(name, filing_date)
+            entity_url TEXT
         )
-    ''')
+    """)
     conn.commit()
     conn.close()
 
 init_db()
 
-# ---------- SCRAPER ----------
-def scrape_llcs(days=7, max_pages=5):
-    """Scrape new LLCs from azcc.gov"""
+# --- Scraper function ---
+def scrape_recent_llcs(days_back=7):
+    cutoff_date = datetime.today() - timedelta(days=days_back)
     results = []
-    today = datetime.date.today()
-    cutoff = today - datetime.timedelta(days=days)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-
+        # Example search URL – you may need to tweak this for AZCC site
         page.goto("https://ecorp.azcc.gov/EntitySearch/Index")
-        page.wait_for_load_state("domcontentloaded")
+        page.wait_for_timeout(5000)  # Wait for page to load
 
-        # Example: click or set search filters
-        # You may need to adjust selectors if site changes
-        # This is placeholder — real azcc.gov scraping needs selector testing
+        # NOTE: You'll need to adjust selectors for AZCC site
+        # For now, this is just a placeholder loop
+        rows = page.query_selector_all("table tbody tr")
+        for row in rows:
+            cols = row.query_selector_all("td")
+            if len(cols) >= 2:
+                name = cols[0].inner_text().strip()
+                filing_date_str = cols[1].inner_text().strip()
+                try:
+                    filing_date = datetime.strptime(filing_date_str, "%m/%d/%Y")
+                except:
+                    continue
 
-        for page_num in range(1, max_pages + 1):
-            # TODO: Replace with actual scraping logic for LLC name/date/link
-            fake_data = [
-                {
-                    "name": f"Test LLC {page_num}-{i}",
-                    "filing_date": str(today - datetime.timedelta(days=i)),
-                    "link": "https://ecorp.azcc.gov/EntitySearch/BusinessInfo?entityId=123"
-                }
-                for i in range(3)
-            ]
-            for row in fake_data:
-                filing_dt = datetime.date.fromisoformat(row["filing_date"])
-                if filing_dt >= cutoff:
-                    results.append(row)
+                if filing_date >= cutoff_date:
+                    link_el = cols[0].query_selector("a")
+                    url = link_el.get_attribute("href") if link_el else None
+                    results.append({
+                        "name": name,
+                        "filing_date": filing_date_str,
+                        "entity_url": url
+                    })
 
         browser.close()
 
-    return results
-
-# ---------- DATABASE SAVE ----------
-def save_llcs_to_db(llcs):
+    # Save to DB
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    for llc in llcs:
-        try:
-            c.execute(
-                "INSERT OR IGNORE INTO llcs (name, filing_date, link) VALUES (?, ?, ?)",
-                (llc["name"], llc["filing_date"], llc["link"])
-            )
-        except Exception as e:
-            print(f"DB insert error: {e}")
+    for r in results:
+        c.execute("INSERT INTO llcs (name, filing_date, entity_url) VALUES (?, ?, ?)",
+                  (r["name"], r["filing_date"], r["entity_url"]))
     conn.commit()
     conn.close()
 
-# ---------- API ROUTES ----------
-@app.route("/api/llcs/recent", methods=["GET"])
-def get_recent_llcs():
-    days = int(request.args.get("days", 7))
-    page_num = int(request.args.get("page", 1))
-    per_page = int(request.args.get("per_page", 10))
+    return results
 
+# --- API endpoint ---
+@app.route("/api/llcs/recent")
+def get_recent_llcs():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    cutoff_date = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
-    c.execute("SELECT name, filing_date, link FROM llcs WHERE filing_date >= ? ORDER BY filing_date DESC", (cutoff_date,))
+    c.execute("SELECT name, filing_date, entity_url FROM llcs ORDER BY filing_date DESC")
     rows = c.fetchall()
     conn.close()
 
-    # Pagination
-    start = (page_num - 1) * per_page
-    end = start + per_page
-    paginated = rows[start:end]
-
-    data = [{"name": r[0], "filing_date": r[1], "link": r[2]} for r in paginated]
-    return jsonify(data)
-
-@app.route("/api/llcs/scrape", methods=["POST"])
-def scrape_and_save():
-    llcs = scrape_llcs()
-    save_llcs_to_db(llcs)
-    return jsonify({"status": "success", "scraped": len(llcs)})
+    llcs = [{"name": r[0], "filing_date": r[1], "entity_url": r[2]} for r in rows]
+    return jsonify(llcs)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
