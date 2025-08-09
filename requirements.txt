@@ -2,7 +2,3 @@ flask
 flask-cors
 playwright
 apscheduler
-python-dotenv
-requests
-beautifulsoup4
-pandas
